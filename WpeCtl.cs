@@ -371,6 +371,26 @@ namespace WpeCtl
             return false;
         }
 
+        /// <summary>
+        /// config.json 报回的可能是打包产物（scene.pkg），还原时必须改投同目录的 project.json，
+        /// 否则 openWallpaper 不认这种路径。
+        /// </summary>
+        public static string ResolveRestoreTarget(string reportedPath)
+        {
+            if (string.IsNullOrEmpty(reportedPath)) return null;
+            string path = reportedPath.Trim().Trim('"');
+            if (!File.Exists(path))
+                return ResolveTarget(path);
+
+            string name = Path.GetFileName(path).ToLowerInvariant();
+            if (name.EndsWith(".pkg") || name.EndsWith(".tex"))
+            {
+                string pj = Path.Combine(Path.GetDirectoryName(path), "project.json");
+                if (File.Exists(pj)) return pj;
+            }
+            return path;
+        }
+
         public static bool OpenPlaylist(string name, int monitor, out string error)
         {
             string args = "openPlaylist -playlist \"" + name + "\"";
@@ -402,6 +422,151 @@ namespace WpeCtl
                     names.Add(Convert.ToString(nameNode, CultureInfo.InvariantCulture));
             }
             return names;
+        }
+
+        /// <summary>一次 insertCurrent 的逐显示器记录。</summary>
+        public sealed class InsertRecord
+        {
+            public string Monitor = "";
+            public int Index;
+            public string Original = "";
+            public string Inserted;
+            public bool Restored;
+            public string Error;
+        }
+
+        private static int MonitorIndexOfKey(string key)
+        {
+            if (key == null) return 0;
+            string digits = "";
+            foreach (char c in key) { if (c >= '0' && c <= '9') digits += c; }
+            int n;
+            return int.TryParse(digits, NumberStyles.Integer, CultureInfo.InvariantCulture, out n) ? n : 0;
+        }
+
+        /// <summary>
+        /// 临时把 path 插到当前壁纸前面：holdMs 后（holdForever 时直到 Ctrl+C）自动回到原壁纸。
+        /// monitor 小于 0 表示所有显示器。
+        /// </summary>
+        public static bool InsertCurrent(string path, int holdMs, bool holdForever, int monitor,
+                                         out List<InsertRecord> records, out string error)
+        {
+            records = new List<InsertRecord>();
+            error = null;
+
+            Dictionary<string, string> originals;
+            if (monitor >= 0)
+            {
+                string one = WallpaperState.Current(monitor, out error);
+                if (one == null) return false;
+                originals = new Dictionary<string, string>();
+                originals["Monitor" + monitor.ToString(CultureInfo.InvariantCulture)] = one;
+            }
+            else
+            {
+                originals = WallpaperState.All(out error);
+                if (originals.Count == 0)
+                {
+                    error = error ?? "no wallpaper state";
+                    return false;
+                }
+            }
+
+            string target = ResolveTarget(path);
+            if (target == null)
+            {
+                error = "path not found or has no project.json: " + path;
+                return false;
+            }
+
+            foreach (KeyValuePair<string, string> kv in originals)
+            {
+                InsertRecord rec = new InsertRecord();
+                rec.Monitor = kv.Key;
+                rec.Index = MonitorIndexOfKey(kv.Key);
+                rec.Original = kv.Value;
+
+                string inserted;
+                string err;
+                if (!OpenWallpaper(target, rec.Index, out inserted, out err))
+                {
+                    rec.Error = err;
+                    records.Add(rec);
+                    error = err;
+                    RestoreRecords(records);
+                    return false;
+                }
+                rec.Inserted = inserted;
+                records.Add(rec);
+            }
+
+            Hold(holdMs, holdForever);
+            RestoreRecords(records);
+
+            bool allOk = true;
+            foreach (InsertRecord r in records) { if (!r.Restored) allOk = false; }
+            if (!allOk && error == null) error = "one or more monitors were not restored";
+            return allOk;
+        }
+
+        private static void RestoreRecords(List<InsertRecord> records)
+        {
+            foreach (InsertRecord rec in records)
+            {
+                if (rec.Restored || string.IsNullOrEmpty(rec.Original)) continue;
+                string restoreTarget = ResolveRestoreTarget(rec.Original);
+                if (restoreTarget == null)
+                {
+                    rec.Error = "restore target not found: " + rec.Original;
+                    continue;
+                }
+
+                string reported;
+                string err = null;
+                for (int attempt = 0; attempt < 3; attempt++)
+                {
+                    if (OpenWallpaper(restoreTarget, rec.Index, out reported, out err))
+                    {
+                        rec.Restored = true;
+                        rec.Error = null;
+                        break;
+                    }
+                    rec.Error = err;
+                    Thread.Sleep(400);
+                }
+            }
+        }
+
+        private static volatile bool cancelRequested;
+
+        private static void Hold(int holdMs, bool holdForever)
+        {
+            ConsoleCancelEventHandler handler = delegate(object s, ConsoleCancelEventArgs e)
+            {
+                e.Cancel = true;
+                cancelRequested = true;
+            };
+            Console.CancelKeyPress += handler;
+            try
+            {
+                if (holdForever)
+                {
+                    while (!cancelRequested) Thread.Sleep(100);
+                    return;
+                }
+                int waited = 0;
+                while (waited < holdMs && !cancelRequested)
+                {
+                    int step = holdMs - waited < 100 ? holdMs - waited : 100;
+                    Thread.Sleep(step);
+                    waited += step;
+                }
+            }
+            finally
+            {
+                Console.CancelKeyPress -= handler;
+                cancelRequested = false;
+            }
         }
     }
 
@@ -484,6 +649,8 @@ namespace WpeCtl
         {
             bool json = false;
             int monitor = -1;
+            int holdMs = 10000;
+            bool keep = false;
             List<string> rest = new List<string>();
 
             for (int i = 0; i < args.Length; i++)
@@ -491,6 +658,9 @@ namespace WpeCtl
                 if (string.Equals(args[i], "--json", StringComparison.OrdinalIgnoreCase)) json = true;
                 else if (string.Equals(args[i], "--monitor", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                     monitor = int.Parse(args[++i], CultureInfo.InvariantCulture);
+                else if (string.Equals(args[i], "--for", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+                    holdMs = int.Parse(args[++i], CultureInfo.InvariantCulture);
+                else if (string.Equals(args[i], "--keep", StringComparison.OrdinalIgnoreCase)) keep = true;
                 else rest.Add(args[i]);
             }
 
@@ -518,6 +688,10 @@ namespace WpeCtl
                 case "playlist":
                     if (rest.Count < 2) { Usage(); return 1; }
                     return CmdPlaylist(rest[1], json, monitor);
+                case "insert":
+                case "insertcurrent":
+                    if (rest.Count < 2) { Usage(); return 1; }
+                    return CmdInsert(rest[1], json, monitor, holdMs, keep);
                 case "toggle":
                     if (rest.Count < 2) { Usage(); return 1; }
                     return CmdToggle(rest[1], json);
@@ -659,6 +833,48 @@ namespace WpeCtl
             return ok ? 0 : 3;
         }
 
+        private static int CmdInsert(string path, bool json, int monitor, int holdMs, bool keep)
+        {
+            List<Control.InsertRecord> records;
+            string error;
+            bool ok = Control.InsertCurrent(path, holdMs, keep, monitor, out records, out error);
+
+            if (json)
+            {
+                StringBuilder sb = new StringBuilder();
+                sb.Append("{\"ok\":" + (ok ? "true" : "false") + ",\"command\":\"insertCurrent\"");
+                sb.Append(",\"requested\":\"" + Escape(path) + "\"");
+                sb.Append(",\"hold\":\"" + (keep ? "until-ctrl-c" : holdMs.ToString(CultureInfo.InvariantCulture) + "ms") + "\"");
+                sb.Append(",\"monitors\":[");
+                for (int i = 0; i < records.Count; i++)
+                {
+                    Control.InsertRecord r = records[i];
+                    if (i > 0) sb.Append(",");
+                    sb.Append("{\"monitor\":\"" + Escape(r.Monitor) + "\"");
+                    sb.Append(",\"original\":\"" + Escape(r.Original) + "\"");
+                    sb.Append(",\"inserted\":\"" + Escape(r.Inserted ?? "") + "\"");
+                    sb.Append(",\"restored\":" + (r.Restored ? "true" : "false"));
+                    if (r.Error != null) sb.Append(",\"error\":\"" + Escape(r.Error) + "\"");
+                    sb.Append("}");
+                }
+                sb.Append("]");
+                if (error != null) sb.Append(",\"error\":\"" + Escape(error) + "\"");
+                sb.Append("}");
+                Console.WriteLine(sb.ToString());
+            }
+            else
+            {
+                foreach (Control.InsertRecord r in records)
+                {
+                    Console.WriteLine(r.Monitor + ": " + r.Original + "  ->  " + (r.Inserted ?? "(failed)") +
+                                      (r.Restored ? "  [restored]" : "  [NOT RESTORED]") +
+                                      (r.Error != null ? "  " + r.Error : ""));
+                }
+                if (!ok) Console.Error.WriteLine("failed: " + error);
+            }
+            return ok ? 0 : 3;
+        }
+
         private static int CmdToggle(string action, bool json)
         {
             uint id;
@@ -731,7 +947,9 @@ namespace WpeCtl
             Console.Error.WriteLine("  wpectl play|pause|stop|mute|unmute|next");
             Console.Error.WriteLine("  wpectl playlists                             列出播放列表");
             Console.Error.WriteLine("  wpectl playlist <name> [--monitor N]");
-            Console.Error.WriteLine("  wpectl toggle <pause|stop|mute|screenshot|browse|settings|editor>");
+            Console.Error.WriteLine("  wpectl insert <path> [--for ms|--keep] [--monitor N]");
+                Console.Error.WriteLine("    临时插入一个壁纸，到点（默认 10000ms）或 Ctrl+C 后自动回到原壁纸；别名 insertcurrent");
+                Console.Error.WriteLine("  wpectl toggle <pause|stop|mute|screenshot|browse|settings|editor>");
             Console.Error.WriteLine("  wpectl raw <id>");
             Console.Error.WriteLine("  exit: 0 ok, 1 usage, 2 engine not found, 3 command failed");
         }

@@ -45,6 +45,13 @@ check("play() 恢复", (wpe.play()))
 check("mute()", (wpe.mute()))
 check("unmute()", (wpe.unmute()))
 
+if cur then
+  local okIns, insRaw = wpe.insert(cur, 1500)
+  check("insert(当前壁纸, 1500ms) 成功", okIns, insRaw)
+  local afterIns = wpe.current()
+  check("insert 结束后已还原", afterIns == cur, tostring(afterIns))
+end
+
 local lists = wpe.playlists()
 check("playlists() 可读", type(lists) == "string", lists)
 

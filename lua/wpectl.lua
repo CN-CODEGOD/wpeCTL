@@ -78,6 +78,22 @@ function M.set(path)
 end
 
 --- 播放控制（绝对语义）
+--- 临时插入一个壁纸，holdMs 毫秒后自动回到原壁纸（默认由 CLI 决定，10000）
+--- 返回 ok, 原始JSON
+function M.insert(path, holdMs)
+  local args = "insert " .. quote(path)
+  if holdMs then args = args .. " --for " .. tostring(holdMs) end
+  local out = run(args, true)
+  return isTrue(out, "ok"), out
+end
+
+--- 一直插入，直到 Ctrl+C（处理器会先还原再退出）
+function M.insertKeep(path)
+  local out = run("insert " .. quote(path) .. " --keep", true)
+  return isTrue(out, "ok"), out
+end
+
+--- 播放控制（绝对语义）
 local function simple(name)
   return function()
     local out = run(name, true)

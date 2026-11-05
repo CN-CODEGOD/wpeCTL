@@ -20,6 +20,7 @@ wpectl set <路径> [--monitor N] [--json]         把文件/项目设为壁纸�
 wpectl play | pause | stop | mute | unmute | next
 wpectl playlists                                列出播放列表名
 wpectl playlist <名称> [--monitor N]            播放指定播放列表
+wpectl insert <路径> [--for ms|--keep] [--monitor N]  临时插入，到点自动回到原壁纸
 wpectl toggle <pause|stop|mute|screenshot|browse|settings|editor>
 wpectl raw <id>                                 直接投递任意 WM_COMMAND
 ```
@@ -31,6 +32,23 @@ wpectl raw <id>                                 直接投递任意 WM_COMMAND
 - 媒体文件（`.mp4` `.jpg` `.png` …）→ 直接播放
 - 项目目录 → 自动解析为其中的 `project.json`（场景项目必须这样给，引擎随后会回报 `<dir>/scene.pkg`）
 - `project.json` 本身 → 直接使用
+
+### insertCurrent —— 临时插入再还原
+
+```bat
+wpectl insert "D:/pics/cat.jpg" --for 8000
+wpectl insert "D:/videos/intro.mp4" --keep
+```
+
+先记下当前壁纸，播放目标 `--for` 毫秒（默认 10000），到点后自动还原；`--keep` 表示一直显示到 Ctrl+C。
+不带 `--monitor` 时对所有显示器插入并逐个还原。
+
+还原用的是当前壁纸原路径：场景壁纸在 `config.json` 里记录的是 `scene.pkg`，
+模块会自动改投同目录的 `project.json`（`openWallpaper` 不认 `.pkg` 路径）。
+还原失败会重试 3 次，仍失败时 JSON 里该显示器的 `restored` 为 `false` 并带 `error`。
+
+注意：Ctrl+C 会走还原逻辑（处理器里 `e.Cancel = true`），但 `taskkill` 这类强杀不经过处理器，
+壁纸会停在插入的那一个，需要自己再 `wpectl set` 回去。
 
 ## 构建
 
@@ -69,6 +87,7 @@ wpe.pause(); wpe.play()       -- 绝对语义
 wpe.set("D:/pics/cat.jpg")    -- 换壁纸
 print(wpe.playlists())        -- 播放列表
 wpe.toggle("screenshot")      -- WM_COMMAND 通道
+wpe.insert("D:/pics/cat.jpg", 5000)   -- 临时插入，5 秒后自动回到原壁纸
 ```
 
 `lua/wpectl_ffi.lua` — LuaJIT FFI，直接调 `user32`，不启动任何进程；只覆盖 WM_COMMAND 那组命令（`pause stop mute screenshot next browse settings editor` 的 toggle 语义），不含 `current / set / playlist`。
