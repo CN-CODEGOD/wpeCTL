@@ -1,0 +1,2 @@
+# 构建产物（用 tools\build.cmd 可复现）
+bin/
